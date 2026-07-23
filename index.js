@@ -9,7 +9,12 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: ['https://lucent-longma-318cfc.netlify.app', 'http://localhost:3000', '*'],
+  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization']
+}));
+app.options('*', cors());
 app.use(express.json());
 
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://rmnxrepcsohhwnnlwnwn.supabase.co';
