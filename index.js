@@ -271,4 +271,13 @@ app.post('/messages/:leadId/read', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
+// Keep alive - prevents Railway free tier from sleeping
+setInterval(async () => {
+  try {
+    const res = await fetch(`http://localhost:${PORT}/status`);
+    const data = await res.json();
+    console.log(`[Keep-alive] Status: ${data.status} | ${new Date().toLocaleString('it-IT')}`);
+  } catch(e) {}
+}, 4 * 60 * 1000); // every 4 minutes
+
 connectToWhatsApp();
