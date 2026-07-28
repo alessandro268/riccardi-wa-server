@@ -322,7 +322,50 @@ async function handleAutopilot(lead, incomingMsg, jid) {
 // ============================================================
 // API ROUTES
 // ============================================================
-app.get('/', (req, res) => res.json({ service: 'Riccardi WA Server v2', clients: { business: clients.business.status, personal: clients.personal.status } }));
+app.get('/', (req, res) => {
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Riccardi WA Server</title>
+  <style>body{font-family:sans-serif;background:#1A1A2E;color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;}
+  .card{background:#3B0051;border-radius:12px;padding:24px;margin:10px;text-align:center;min-width:280px;}
+  .status{font-size:13px;margin-top:8px;color:rgba(255,255,255,0.7);}
+  .btn{display:inline-block;margin-top:12px;padding:8px 20px;border-radius:20px;background:#FF004F;color:#fff;text-decoration:none;font-weight:600;font-size:13px;}
+  h1{margin-bottom:20px;font-size:22px;}</style></head>
+  <body><h1>🟣 Riccardi WA Server</h1>
+  <div style="display:flex;flex-wrap:wrap;justify-content:center;">
+  <div class="card"><div style="font-size:20px">📱 Numero Business</div>
+  <div class="status">Stato: <strong>${clients.business.status}</strong></div>
+  <a href="/qr-page/business" class="btn">Mostra QR Business</a></div>
+  <div class="card"><div style="font-size:20px">👤 Numero Personale (Agente)</div>
+  <div class="status">Stato: <strong>${clients.personal.status}</strong></div>
+  <a href="/qr-page/personal" class="btn">Mostra QR Personale</a></div>
+  </div></body></html>`);
+});
+
+app.get('/qr-page/:type', async (req, res) => {
+  const type = req.params.type === 'personal' ? 'personal' : 'business';
+  const qrEndpoint = type === 'personal' ? '/qr2' : '/qr';
+  const label = type === 'personal' ? 'Numero Personale (Agente)' : 'Numero Business (Lead)';
+  const client = clients[type];
+  
+  let qrHtml = '';
+  if (client.status === 'ready') {
+    qrHtml = '<div style="background:#01C38D;padding:16px;border-radius:10px;font-size:16px;font-weight:700;">✅ Già connesso!</div>';
+  } else if (client.qr) {
+    qrHtml = `<img src="${client.qr}" style="width:250px;height:250px;border-radius:10px;background:#fff;padding:8px;">
+    <div style="font-size:12px;color:rgba(255,255,255,0.7);margin-top:10px;">Apri WhatsApp → Menu → Dispositivi collegati → Collega dispositivo</div>
+    <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:6px;">Questa pagina si aggiorna automaticamente ogni 5 secondi</div>`;
+  } else {
+    qrHtml = '<div style="color:rgba(255,255,255,0.7)">⏳ QR in generazione... ricarica tra qualche secondo</div>';
+  }
+  
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8">
+  <meta http-equiv="refresh" content="5">
+  <title>QR - ${label}</title>
+  <style>body{font-family:sans-serif;background:#1A1A2E;color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;text-align:center;}
+  h2{margin-bottom:20px;}</style></head>
+  <body><h2>📱 ${label}</h2>${qrHtml}
+  <a href="/" style="margin-top:20px;color:rgba(255,255,255,0.5);font-size:12px;">← Torna alla home</a>
+  </body></html>`);
+});
 app.get('/status', (req, res) => res.json({ status: clients.business.status, ready: clients.business.status === 'ready', personal: clients.personal.status }));
 
 app.get('/qr', (req, res) => {
