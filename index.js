@@ -111,6 +111,21 @@ async function handleLeadMessage(phone, body, senderName, jid) {
       direction: 'inbound', timestamp, read: false, is_ai: false
     });
 
+    // Notifica push SOLO se il mittente è un lead già presente nel CRM — mai per numeri
+    // sconosciuti, e mai per Stati/gruppi (già esclusi più sopra, prima di arrivare qui).
+    if (lead) {
+      fetch('https://lucent-longma-318cfc.netlify.app/.netlify/functions/send-push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: '💬 ' + lead.name,
+          body: body.slice(0, 120),
+          url: '/',
+          tag: 'lead-' + lead.id,
+        }),
+      }).catch((e) => console.error('[push] Errore invio notifica:', e.message));
+    }
+
     // Update lead conversation
     if (lead) {
       const newEntry = `\n[${new Date().toLocaleString('it-IT')}] ${senderName}: ${body}`;
