@@ -66,9 +66,10 @@ async function connectClient(key, authDir) {
     for (const msg of messages) {
       if (!msg.message || msg.key.fromMe) continue;
       const jid = msg.key.remoteJid;
-      if (!jid || jid.includes('@g.us')) continue;
+      if (!jid || jid.includes('@g.us') || jid.includes('@broadcast') || jid.includes('@newsletter')) continue;
 
       const phone = jid.replace('@s.whatsapp.net', '').replace(/\D/g, '');
+      if (!phone || phone.length < 8) continue; // protezione extra: numero non valido, non cercare match nel DB
       const body = msg.message.conversation || msg.message.extendedTextMessage?.text || '[Media]';
       const senderName = msg.pushName || phone;
 
@@ -86,6 +87,11 @@ async function connectClient(key, authDir) {
 // ============================================================
 async function handleLeadMessage(phone, body, senderName, jid) {
   console.log(`[LEAD] ${senderName} (${phone}): ${body.slice(0, 50)}`);
+
+  if (!phone || phone.length < 8) {
+    console.warn('[LEAD] Numero non valido, messaggio scartato per evitare abbinamento errato:', jid);
+    return;
+  }
 
   try {
     // Find lead
