@@ -552,6 +552,43 @@ app.post('/messages/:leadId/read', async (req, res) => {
 
 app.get('/pending', (req, res) => res.json(pendingApprovals));
 
+// Risolve il LID per TUTTI i lead esistenti con un numero, in un colpo solo, invece di
+// aspettare di scoprirlo uno alla volta man mano che gli si scrive. Da usare una tantum
+// (visitando questo indirizzo nel browser una volta) — non va richiamato in continuazione,
+// per non stressare la sessione WhatsApp con troppe richieste di fila.
+app.get('/backfill-lids', async (req, res) => {
+  if (clients.business.status !== 'ready') return res.status(503).json({ error: 'Business WhatsApp non collegato in questo momento' });
+  const sock = clients.business.sock;
+  if (!sock?.signalRepository?.lidMapping?.getLIDForPN) {
+    return res.status(400).json({ error: 'Questa funzione non è disponibile con la versione attuale della libreria' });
+  }
+  try {
+    const { data: allLeads } = await supabase.from('leads').select('id,phone').not('phone', 'is', null);
+    let risolti = 0, provati = 0, giaSalvati = 0;
+    for (const l of allLeads || []) {
+      const digits = (l.phone || '').replace(/\D/g, '');
+      if (digits.length < 8) continue;
+      provati++;
+      try {
+        const jid = digits + '@s.whatsapp.net';
+        const lid = await sock.signalRepository.lidMapping.getLIDForPN(jid);
+        if (lid) {
+          const lidDigits = lid.replace('@lid', '').replace(/\D/g, '');
+          if (lidDigits) {
+            const { error } = await supabase.from('lead_wa_identifiers')
+              .upsert({ lead_id: l.id, identifier: lidDigits }, { onConflict: 'identifier', ignoreDuplicates: true });
+            if (!error) risolti++;
+          }
+        }
+      } catch (e) { /* questo lead specifico non ha un LID risolvibile, si va avanti */ }
+      await new Promise(r => setTimeout(r, 400)); // piccola pausa tra un lead e l'altro
+    }
+    res.json({ success: true, lead_totali_con_numero: provati, lid_risolti_e_salvati: risolti });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
