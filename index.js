@@ -61,6 +61,27 @@ async function connectClient(key, authDir) {
     }
   });
 
+  // Recupera i messaggi persi durante una disconnessione: quando la sessione si riconnette,
+  // WhatsApp manda tramite questo evento (separato dai messaggi "live") tutto ciò che è arrivato
+  // nel frattempo. Senza questo ascolto, quei messaggi arrivano sul telefono ma il CRM non li vede.
+  if (key === 'business') {
+    sock.ev.on('messaging-history.set', async ({ messages: historyMessages, syncType }) => {
+      if (!historyMessages || !historyMessages.length) return;
+      console.log(`[HISTORY] Ricevuti ${historyMessages.length} messaggi storici (syncType: ${syncType})`);
+      for (const msg of historyMessages) {
+        if (!msg.message || msg.key.fromMe) continue;
+        let jid = msg.key.remoteJid;
+        if (!jid || jid.includes('@g.us') || jid.includes('@broadcast') || jid.includes('@newsletter')) continue;
+        if (jid.includes('@lid') && msg.key.remoteJidAlt) jid = msg.key.remoteJidAlt;
+        const isRealPhone = !jid.includes('@lid');
+        const phone = isRealPhone ? jid.replace('@s.whatsapp.net', '').replace(/\D/g, '') : jid.replace('@lid', '').replace(/\D/g, '');
+        const body = msg.message.conversation || msg.message.extendedTextMessage?.text || '[Media]';
+        const senderName = msg.pushName || (isRealPhone ? phone : jid);
+        await handleLeadMessage(phone, body, senderName, jid, isRealPhone, msg.key.id);
+      }
+    });
+  }
+
   // Handle incoming messages
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
@@ -87,7 +108,7 @@ async function connectClient(key, authDir) {
       const senderName = msg.pushName || (isRealPhone ? phone : jid);
 
       if (key === 'business') {
-        await handleLeadMessage(phone, body, senderName, jid, isRealPhone);
+        await handleLeadMessage(phone, body, senderName, jid, isRealPhone, msg.key.id);
       } else if (key === 'personal') {
         await handleAgentReply(phone, body, jid);
       }
@@ -98,7 +119,7 @@ async function connectClient(key, authDir) {
 // ============================================================
 // HANDLE INCOMING LEAD MESSAGE (business number)
 // ============================================================
-async function handleLeadMessage(phone, body, senderName, jid, isRealPhone) {
+async function handleLeadMessage(phone, body, senderName, jid, isRealPhone, waMessageId) {
   console.log(`[LEAD] ${senderName} (${isRealPhone ? phone : 'LID non risolto: ' + phone}): ${body.slice(0, 50)}`);
 
   try {
@@ -119,12 +140,14 @@ async function handleLeadMessage(phone, body, senderName, jid, isRealPhone) {
 
     const timestamp = new Date().toISOString();
 
-    // Save message to DB
-    await supabase.from('wa_messages').insert({
+    // Save message to DB — con deduplica sull'ID del messaggio WhatsApp: se lo stesso messaggio
+    // arriva sia "live" sia più tardi nel recupero della cronologia persa, non viene duplicato.
+    await supabase.from('wa_messages').upsert({
+      wa_message_id: waMessageId || null,
       phone: phone || null, sender_name: senderName, body,
       lead_id: lead ? lead.id : null,
       direction: 'inbound', timestamp, read: false, is_ai: false
-    });
+    }, { onConflict: 'wa_message_id', ignoreDuplicates: true });
 
     // Notifica push SOLO se il mittente è un lead già presente nel CRM — mai per numeri
     // sconosciuti, e mai per Stati/gruppi (già esclusi più sopra, prima di arrivare qui).
