@@ -180,6 +180,21 @@ async function handleLeadMessage(phone, body, senderName, jid, isRealPhone, waMe
       lead = leads && leads[0] ? leads[0] : null;
     }
 
+    // Se non è un numero vero (LID non risolto) o comunque non abbiamo trovato nulla,
+    // controlliamo se questo identificativo era già stato "imparato" in passato — o perché
+    // gli avevamo scritto noi per primi, o perché era stato abbinato a mano una volta.
+    if (!lead && phone) {
+      const { data: known } = await supabase
+        .from('lead_wa_identifiers')
+        .select('lead_id')
+        .eq('identifier', phone)
+        .limit(1);
+      if (known && known[0]) {
+        const { data: leadRows } = await supabase.from('leads').select('*').eq('id', known[0].lead_id).limit(1);
+        lead = leadRows && leadRows[0] ? leadRows[0] : null;
+      }
+    }
+
     const timestamp = new Date().toISOString();
 
     // Save message to DB — con deduplica sull'ID del messaggio WhatsApp: se lo stesso messaggio
@@ -190,6 +205,14 @@ async function handleLeadMessage(phone, body, senderName, jid, isRealPhone, waMe
       lead_id: lead ? lead.id : null,
       direction: 'inbound', timestamp, read: false, is_ai: false
     }, { onConflict: 'wa_message_id', ignoreDuplicates: true });
+
+    // "Impariamo" questo abbinamento per il futuro: se questo identificativo non era ancora
+    // in memoria per questo lead, lo salviamo — la prossima volta che scrive con lo stesso
+    // identificativo (specialmente utile per i LID non risolvibili) lo riconosciamo subito.
+    if (lead && phone) {
+      await supabase.from('lead_wa_identifiers')
+        .upsert({ lead_id: lead.id, identifier: phone }, { onConflict: 'identifier', ignoreDuplicates: true });
+    }
 
     // Notifica push SOLO se il mittente è un lead già presente nel CRM — mai per numeri
     // sconosciuti, e mai per Stati/gruppi (già esclusi più sopra, prima di arrivare qui).
@@ -490,6 +513,27 @@ app.post('/send', async (req, res) => {
     const lead = leadId ? { id: leadId } : null;
     await sendToLead(jid, message, lead, false);
     res.json({ success: true });
+
+    // Proviamo (senza bloccare la risposta, e senza rischio se fallisce) a scoprire se questo
+    // numero ha anche un identificativo LID, e lo salviamo subito in memoria per il lead —
+    // così se in futuro risponde con quell'identificativo lo riconosciamo senza abbinarlo a mano.
+    if (leadId) {
+      try {
+        const sock = clients.business.sock;
+        const lid = await sock?.signalRepository?.lidMapping?.getLIDForPN?.(jid);
+        if (lid) {
+          const lidDigits = lid.replace('@lid', '').replace(/\D/g, '');
+          if (lidDigits) {
+            await supabase.from('lead_wa_identifiers')
+              .upsert({ lead_id: leadId, identifier: lidDigits }, { onConflict: 'identifier', ignoreDuplicates: true });
+            console.log(`[LID] Risolto e memorizzato per il lead ${leadId}: ${lidDigits}`);
+          }
+        }
+      } catch (lidErr) {
+        // Non è disponibile in questa versione della libreria o per questo contatto: nessun problema,
+        // resta comunque il riconoscimento automatico alla prima risposta abbinata a mano.
+      }
+    }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
