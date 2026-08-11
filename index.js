@@ -8,6 +8,46 @@ const path = require('path');
 
 const app = express();
 app.use(cors({ origin: '*' }));
+
+// Estrae il vero contenuto di un messaggio WhatsApp, gestendo i casi che prima
+// finivano tutti genericamente etichettati "[Media]" anche quando non c'entrava nulla
+// (reazioni con emoji, notifiche di modifica/cancellazione messaggio, messaggi
+// "a scomparsa"). Ritorna null se non è un vero messaggio da salvare (va scartato).
+function extractMessageBody(message) {
+  if (!message) return null;
+
+  // Notifiche di sistema (modifica/cancellazione di un messaggio precedente): non sono
+  // un nuovo messaggio dell'utente, vanno ignorate.
+  if (message.protocolMessage) return null;
+  // Una reazione con emoji a un messaggio: non è un messaggio nuovo, va ignorata.
+  if (message.reactionMessage) return null;
+
+  // Messaggi "a scomparsa"/"visualizza una volta": il contenuto vero è annidato dentro.
+  const inner = message.ephemeralMessage?.message
+    || message.viewOnceMessage?.message
+    || message.viewOnceMessageV2?.message
+    || message.viewOnceMessageV2Extension?.message
+    || message;
+
+  if (inner.conversation) return inner.conversation;
+  if (inner.extendedTextMessage?.text) return inner.extendedTextMessage.text;
+  if (inner.imageMessage) return inner.imageMessage.caption || '[Foto]';
+  if (inner.videoMessage) return inner.videoMessage.caption || '[Video]';
+  if (inner.documentMessage) return inner.documentMessage.caption || ('[Documento] ' + (inner.documentMessage.fileName || ''));
+  if (inner.audioMessage) return inner.audioMessage.ptt ? '[Messaggio vocale]' : '[Audio]';
+  if (inner.stickerMessage) return '[Sticker]';
+  if (inner.contactMessage || inner.contactsArrayMessage) return '[Contatto condiviso]';
+  if (inner.locationMessage || inner.liveLocationMessage) return '[Posizione condivisa]';
+  if (inner.buttonsResponseMessage) return inner.buttonsResponseMessage.selectedDisplayText || '[Risposta a pulsante]';
+  if (inner.listResponseMessage) return inner.listResponseMessage.title || '[Risposta a lista]';
+  if (inner.templateButtonReplyMessage) return inner.templateButtonReplyMessage.selectedDisplayText || '[Risposta a pulsante]';
+  if (inner.pollCreationMessage || inner.pollCreationMessageV3) return '[Sondaggio]';
+
+  // Tipo non gestito esplicitamente: lo segnaliamo come tale invece di far finta che sia media,
+  // così è chiaro nei log quando capita un tipo nuovo da aggiungere in futuro.
+  return null;
+}
+
 app.use(express.json());
 
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://rmnxrepcsohhwnnlwnwn.supabase.co';
@@ -70,12 +110,13 @@ async function connectClient(key, authDir) {
       console.log(`[HISTORY] Ricevuti ${historyMessages.length} messaggi storici (syncType: ${syncType})`);
       for (const msg of historyMessages) {
         if (!msg.message || msg.key.fromMe) continue;
+        const body = extractMessageBody(msg.message);
+        if (body === null) continue; // reazione, notifica di modifica/cancellazione, o tipo non gestito: non è un messaggio reale
         let jid = msg.key.remoteJid;
         if (!jid || jid.includes('@g.us') || jid.includes('@broadcast') || jid.includes('@newsletter')) continue;
         if (jid.includes('@lid') && msg.key.remoteJidAlt) jid = msg.key.remoteJidAlt;
         const isRealPhone = !jid.includes('@lid');
         const phone = isRealPhone ? jid.replace('@s.whatsapp.net', '').replace(/\D/g, '') : jid.replace('@lid', '').replace(/\D/g, '');
-        const body = msg.message.conversation || msg.message.extendedTextMessage?.text || '[Media]';
         const senderName = msg.pushName || (isRealPhone ? phone : jid);
         await handleLeadMessage(phone, body, senderName, jid, isRealPhone, msg.key.id);
       }
@@ -86,6 +127,8 @@ async function connectClient(key, authDir) {
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
       if (!msg.message || msg.key.fromMe) continue;
+      const body = extractMessageBody(msg.message);
+      if (body === null) continue; // reazione, notifica di modifica/cancellazione, o tipo non gestito: non è un messaggio reale
       let jid = msg.key.remoteJid;
       if (!jid || jid.includes('@g.us') || jid.includes('@broadcast') || jid.includes('@newsletter')) continue;
 
@@ -104,7 +147,6 @@ async function connectClient(key, authDir) {
       // così i messaggi dello stesso contatto restano raggruppati insieme nell'Inbox invece di
       // mischiarsi con quelli di altri contatti non risolti. isRealPhone lo dice al resto del codice.
       const isRealPhone = !jid.includes('@lid');
-      const body = msg.message.conversation || msg.message.extendedTextMessage?.text || '[Media]';
       const senderName = msg.pushName || (isRealPhone ? phone : jid);
 
       if (key === 'business') {
