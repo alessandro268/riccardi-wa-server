@@ -77,12 +77,17 @@ async function connectClient(key, authDir) {
         jid = msg.key.remoteJidAlt;
       }
 
-      const phone = jid.includes('@lid') ? '' : jid.replace('@s.whatsapp.net', '').replace(/\D/g, '');
+      const phone = jid.includes('@lid') ? jid.replace('@lid', '').replace(/\D/g, '') : jid.replace('@s.whatsapp.net', '').replace(/\D/g, '');
+      // Se il numero non è stato risolto (jid è ancora un LID), il valore sopra NON è un vero
+      // numero di telefono, ma un identificativo interno — lo teniamo comunque come "segnaposto"
+      // così i messaggi dello stesso contatto restano raggruppati insieme nell'Inbox invece di
+      // mischiarsi con quelli di altri contatti non risolti. isRealPhone lo dice al resto del codice.
+      const isRealPhone = !jid.includes('@lid');
       const body = msg.message.conversation || msg.message.extendedTextMessage?.text || '[Media]';
-      const senderName = msg.pushName || phone || jid;
+      const senderName = msg.pushName || (isRealPhone ? phone : jid);
 
       if (key === 'business') {
-        await handleLeadMessage(phone, body, senderName, jid);
+        await handleLeadMessage(phone, body, senderName, jid, isRealPhone);
       } else if (key === 'personal') {
         await handleAgentReply(phone, body, jid);
       }
@@ -93,20 +98,17 @@ async function connectClient(key, authDir) {
 // ============================================================
 // HANDLE INCOMING LEAD MESSAGE (business number)
 // ============================================================
-async function handleLeadMessage(phone, body, senderName, jid) {
-  console.log(`[LEAD] ${senderName} (${phone || 'numero non risolto, LID: ' + jid}): ${body.slice(0, 50)}`);
+async function handleLeadMessage(phone, body, senderName, jid, isRealPhone) {
+  console.log(`[LEAD] ${senderName} (${isRealPhone ? phone : 'LID non risolto: ' + phone}): ${body.slice(0, 50)}`);
 
   try {
-    // Cerchiamo un lead SOLO se abbiamo davvero almeno 9 cifre valide da confrontare.
-    // Senza questo controllo, un numero troppo corto o vuoto produrrebbe una ricerca "%%%"
-    // che in SQL corrisponde A QUALSIASI lead nel database, abbinando il messaggio al primo
-    // che capita — esattamente il bug che ha causato messaggi finiti sul lead sbagliato.
-    // Se il numero non è disponibile (es. contatto migrato al nuovo sistema LID di WhatsApp,
-    // senza numero alternativo fornito), il messaggio viene comunque salvato — semplicemente
-    // senza lead abbinato, visibile in Inbox come "Non nel CRM" invece di sparire nel nulla.
+    // Cerchiamo un lead SOLO se questo è davvero un numero di telefono (non un segnaposto LID)
+    // e abbiamo almeno 9 cifre valide da confrontare. Senza questi controlli, un numero troppo
+    // corto/vuoto produrrebbe una ricerca "%%%" che in SQL corrisponde A QUALSIASI lead nel
+    // database, abbinando il messaggio al primo che capita — il bug corretto in precedenza.
     const last9 = (phone || '').slice(-9);
     let lead = null;
-    if (last9.length === 9) {
+    if (isRealPhone && last9.length === 9) {
       const { data: leads } = await supabase
         .from('leads')
         .select('*')
