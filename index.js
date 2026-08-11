@@ -65,13 +65,21 @@ async function connectClient(key, authDir) {
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
       if (!msg.message || msg.key.fromMe) continue;
-      const jid = msg.key.remoteJid;
+      let jid = msg.key.remoteJid;
       if (!jid || jid.includes('@g.us') || jid.includes('@broadcast') || jid.includes('@newsletter')) continue;
 
-      const phone = jid.replace('@s.whatsapp.net', '').replace(/\D/g, '');
-      if (!phone || phone.length < 8) continue; // protezione extra: numero non valido, non cercare match nel DB
+      // WhatsApp sta migrando alcuni contatti a un identificativo "LID" (@lid) al posto del
+      // numero di telefono, per privacy. Quando succede, Baileys fornisce quasi sempre anche
+      // l'identificativo "alternativo" basato sul vero numero (remoteJidAlt) — lo usiamo se c'è,
+      // altrimenti il numero non è ricavabile e il messaggio resta senza lead abbinato (ma non
+      // viene comunque perso: si vede lo stesso nell'Inbox "Non nel CRM").
+      if (jid.includes('@lid') && msg.key.remoteJidAlt) {
+        jid = msg.key.remoteJidAlt;
+      }
+
+      const phone = jid.includes('@lid') ? '' : jid.replace('@s.whatsapp.net', '').replace(/\D/g, '');
       const body = msg.message.conversation || msg.message.extendedTextMessage?.text || '[Media]';
-      const senderName = msg.pushName || phone;
+      const senderName = msg.pushName || phone || jid;
 
       if (key === 'business') {
         await handleLeadMessage(phone, body, senderName, jid);
@@ -86,27 +94,32 @@ async function connectClient(key, authDir) {
 // HANDLE INCOMING LEAD MESSAGE (business number)
 // ============================================================
 async function handleLeadMessage(phone, body, senderName, jid) {
-  console.log(`[LEAD] ${senderName} (${phone}): ${body.slice(0, 50)}`);
-
-  if (!phone || phone.length < 8) {
-    console.warn('[LEAD] Numero non valido, messaggio scartato per evitare abbinamento errato:', jid);
-    return;
-  }
+  console.log(`[LEAD] ${senderName} (${phone || 'numero non risolto, LID: ' + jid}): ${body.slice(0, 50)}`);
 
   try {
-    // Find lead
-    const { data: leads } = await supabase
-      .from('leads')
-      .select('*')
-      .or(`phone.ilike.%${phone.slice(-9)}%`)
-      .limit(1);
+    // Cerchiamo un lead SOLO se abbiamo davvero almeno 9 cifre valide da confrontare.
+    // Senza questo controllo, un numero troppo corto o vuoto produrrebbe una ricerca "%%%"
+    // che in SQL corrisponde A QUALSIASI lead nel database, abbinando il messaggio al primo
+    // che capita — esattamente il bug che ha causato messaggi finiti sul lead sbagliato.
+    // Se il numero non è disponibile (es. contatto migrato al nuovo sistema LID di WhatsApp,
+    // senza numero alternativo fornito), il messaggio viene comunque salvato — semplicemente
+    // senza lead abbinato, visibile in Inbox come "Non nel CRM" invece di sparire nel nulla.
+    const last9 = (phone || '').slice(-9);
+    let lead = null;
+    if (last9.length === 9) {
+      const { data: leads } = await supabase
+        .from('leads')
+        .select('*')
+        .or(`phone.ilike.%${last9}%`)
+        .limit(1);
+      lead = leads && leads[0] ? leads[0] : null;
+    }
 
-    let lead = leads && leads[0] ? leads[0] : null;
     const timestamp = new Date().toISOString();
 
     // Save message to DB
     await supabase.from('wa_messages').insert({
-      phone, sender_name: senderName, body,
+      phone: phone || null, sender_name: senderName, body,
       lead_id: lead ? lead.id : null,
       direction: 'inbound', timestamp, read: false, is_ai: false
     });
