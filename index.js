@@ -109,7 +109,7 @@ async function connectClient(key, authDir) {
       if (!historyMessages || !historyMessages.length) return;
       console.log(`[HISTORY] Ricevuti ${historyMessages.length} messaggi storici (syncType: ${syncType})`);
       for (const msg of historyMessages) {
-        if (!msg.message || msg.key.fromMe) continue;
+        if (!msg.message) continue;
         const body = extractMessageBody(msg.message);
         if (body === null) continue; // reazione, notifica di modifica/cancellazione, o tipo non gestito: non è un messaggio reale
         let jid = msg.key.remoteJid;
@@ -117,6 +117,10 @@ async function connectClient(key, authDir) {
         if (jid.includes('@lid') && msg.key.remoteJidAlt) jid = msg.key.remoteJidAlt;
         const isRealPhone = !jid.includes('@lid');
         const phone = isRealPhone ? jid.replace('@s.whatsapp.net', '').replace(/\D/g, '') : jid.replace('@lid', '').replace(/\D/g, '');
+        if (msg.key.fromMe) {
+          if (isRealPhone) await handlePhoneSentMessage(phone, body, jid, msg.key.id);
+          continue;
+        }
         const senderName = msg.pushName || (isRealPhone ? phone : jid);
         await handleLeadMessage(phone, body, senderName, jid, isRealPhone, msg.key.id);
       }
@@ -126,7 +130,7 @@ async function connectClient(key, authDir) {
   // Handle incoming messages
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
-      if (!msg.message || msg.key.fromMe) continue;
+      if (!msg.message) continue;
       const body = extractMessageBody(msg.message);
       if (body === null) continue; // reazione, notifica di modifica/cancellazione, o tipo non gestito: non è un messaggio reale
       let jid = msg.key.remoteJid;
@@ -149,6 +153,16 @@ async function connectClient(key, authDir) {
       const isRealPhone = !jid.includes('@lid');
       const senderName = msg.pushName || (isRealPhone ? phone : jid);
 
+      if (msg.key.fromMe) {
+        // Mandato dal telefono direttamente, non dal CRM: lo salviamo comunque, così la scheda
+        // del lead resta completa. Se invece era già stato mandato dal CRM (sendToLead), l'ID
+        // del messaggio combacia con quello già salvato e questo passaggio non crea un doppione.
+        if (key === 'business' && isRealPhone) {
+          await handlePhoneSentMessage(phone, body, jid, msg.key.id);
+        }
+        continue;
+      }
+
       if (key === 'business') {
         await handleLeadMessage(phone, body, senderName, jid, isRealPhone, msg.key.id);
       } else if (key === 'personal') {
@@ -161,6 +175,33 @@ async function connectClient(key, authDir) {
 // ============================================================
 // HANDLE INCOMING LEAD MESSAGE (business number)
 // ============================================================
+// ============================================================
+// MESSAGGIO MANDATO DAL TELEFONO (non dal CRM) — lo salviamo comunque, così la scheda
+// del lead resta completa anche quando si risponde direttamente dal telefono invece
+// che dal CRM. L'upsert con deduplica sull'ID evita i doppioni con i messaggi già
+// salvati da sendToLead quando l'invio parte invece dal CRM.
+// ============================================================
+async function handlePhoneSentMessage(phone, body, jid, waMessageId) {
+  try {
+    const last9 = (phone || '').slice(-9);
+    let lead = null;
+    if (last9.length === 9) {
+      const { data: leads } = await supabase.from('leads').select('id').or(`phone.ilike.%${last9}%`).limit(1);
+      lead = leads && leads[0] ? leads[0] : null;
+    }
+    if (!lead) {
+      const { data: known } = await supabase.from('lead_wa_identifiers').select('lead_id').eq('identifier', phone).limit(1);
+      if (known && known[0]) lead = { id: known[0].lead_id };
+    }
+    await supabase.from('wa_messages').upsert({
+      wa_message_id: waMessageId || null,
+      phone, sender_name: 'Alessandro', body,
+      lead_id: lead ? lead.id : null,
+      direction: 'outbound', timestamp: new Date().toISOString(), read: true, is_ai: false
+    }, { onConflict: 'wa_message_id', ignoreDuplicates: true });
+  } catch (e) { console.error('[PHONE] Errore salvataggio messaggio dal telefono:', e.message); }
+}
+
 async function handleLeadMessage(phone, body, senderName, jid, isRealPhone, waMessageId) {
   console.log(`[LEAD] ${senderName} (${isRealPhone ? phone : 'LID non risolto: ' + phone}): ${body.slice(0, 50)}`);
 
@@ -386,14 +427,15 @@ async function sendToLead(jid, message, lead, isAI) {
     return;
   }
   try {
-    await clients.business.sock.sendMessage(jid, { text: message });
+    const sentMsg = await clients.business.sock.sendMessage(jid, { text: message });
     const phone = jid.replace('@s.whatsapp.net', '');
-    await supabase.from('wa_messages').insert({
+    await supabase.from('wa_messages').upsert({
+      wa_message_id: sentMsg?.key?.id || null,
       phone, sender_name: isAI ? 'Alessandro (AI)' : 'Alessandro',
       body: message, lead_id: lead ? lead.id : null,
       direction: 'outbound', timestamp: new Date().toISOString(),
       read: true, is_ai: isAI
-    });
+    }, { onConflict: 'wa_message_id', ignoreDuplicates: true });
     if (lead && lead.id) {
       const { data: ld } = await supabase.from('leads').select('conversation').eq('id', lead.id).single();
       const newEntry = `\n[${new Date().toLocaleString('it-IT')}] Alessandro${isAI?' (AI)':''}: ${message}`;
